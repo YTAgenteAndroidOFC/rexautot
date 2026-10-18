@@ -56,35 +56,58 @@ def _filename_from_response(resp, url):
     return urllib.parse.unquote(name) or "download.bin"
 
 
+
 def download(url, dest_dir):
     os.makedirs(dest_dir, exist_ok=True)
+
     gid = _gdrive_id(url)
     if gid:
         log("Google Drive link -> gdown (id=%s)" % gid)
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "gdown"])
-        import gdown  # noqa: E402
-        out = gdown.download(id=gid, output=os.path.join(dest_dir, ""), quiet=False, fuzzy=True)
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", "-q", "gdown"
+        ])
+        import gdown
+        out = gdown.download(
+            id=gid, output=os.path.join(dest_dir, ""),
+            quiet=False, fuzzy=True
+        )
         if not out or not os.path.isfile(out):
-            raise SystemExit("gdown could not fetch the file -- is the link shared as "
-                             "'Anyone with the link'?")
+            raise SystemExit(
+                "gdown could not fetch the file -- check link permissions"
+            )
         return out
+
     if "dropbox.com" in url:
         url = re.sub(r"[?&]dl=0", lambda m: m.group(0)[0] + "dl=1", url)
         if "dl=1" not in url:
             url += ("&" if "?" in url else "?") + "dl=1"
+
     if "mega.nz" in url or "mega.co.nz" in url:
-        log("MEGA link -> megatools not available on the runner; trying mega.py")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "mega.py"])
-        from mega import Mega  # noqa: E402
-        out = Mega().login().download_url(url, dest_dir)
-        return str(out)
+        log("MEGA link -> trying mega.py")
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install", "-q", "mega.py"
+        ])
+        from mega import Mega
+        return str(Mega().login().download_url(url, dest_dir))
+
+    # Não tente corrigir silenciosamente tokens de download corrompidos.
+    if any(ch.isspace() for ch in url):
+        raise SystemExit(
+            "URL contains spaces or line breaks. Paste the complete URL."
+        )
+
     log("GET " + url)
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0"}
+    )
+
     with urllib.request.urlopen(req, timeout=120) as resp:
-        name = _filename_from_response(resp, url)
+        final_url = resp.geturl()
+        content_type = resp.headers.get("Content-Type", "").lower()
+        name = _filename_from_response(resp, final_url)
         path = os.path.join(dest_dir, name)
-        total = int(resp.headers.get("Content-Length") or 0)
-        got, last = 0, -1
+        got = 0
+
         with open(path, "wb") as f:
             while True:
                 chunk = resp.read(1 << 22)
@@ -92,18 +115,29 @@ def download(url, dest_dir):
                     break
                 f.write(chunk)
                 got += len(chunk)
-                if total:
-                    pct = got * 100 // total
-                    if pct // 10 != last:
-                        last = pct // 10
-                        log("  %d%% (%.1f / %.1f MB)" % (pct, got / 1e6, total / 1e6))
+
         log("saved %s (%.1f MB)" % (path, got / 1e6))
-    if got < 1024:
-        head = open(path, "rb").read(512)
-        if b"<html" in head.lower() or b"<!doctype" in head.lower():
-            raise SystemExit("the link returned an HTML page, not a file -- use a DIRECT "
-                             "download link (or a Google Drive / Dropbox share link)")
+
+    with open(path, "rb") as f:
+        head = f.read(4096).lstrip().lower()
+
+    if (
+        "text/html" in content_type
+        or head.startswith(b"<!doctype html")
+        or head.startswith(b"<html")
+        or b"<html" in head[:1024]
+    ):
+        os.remove(path)
+        raise SystemExit(
+            "MediaFire returned HTML instead of the game file. "
+            "Use the original share URL and fix direct-link resolution."
+        )
+
+    if got == 0:
+        raise SystemExit("Downloaded file is empty.")
+
     return path
+
 
 
 # ---------------------------------------------------------------- unpacking
